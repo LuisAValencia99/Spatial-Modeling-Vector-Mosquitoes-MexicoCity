@@ -1,0 +1,309 @@
+library(sf)
+library(sp)
+library(MASS)
+library(scatterplot3d)
+library(geoR)
+library(fields)
+library(maps)
+library(grid)
+library(spatstat)
+library(data.table)
+library(chron)
+library(zoo)
+library(reshape2)
+library(DataCombine)
+library(dplyr)
+library(openair)
+library(ggplot2)
+library(mgcv)
+library(tibble)
+library(anytime)
+library(lubridate)
+library(tidyr)
+library(tidyverse)
+
+setwd("D:/Maestría/Mapas/Contaminantes/O3/")
+COOR<-read.csv("Coordenadas.csv")
+CO2017<-read.csv("2017O3.csv")
+CO2018<-read.csv("2018O3.csv")
+CO2019<-read.csv("2019O3.csv")
+CO2022<-read.csv("2022O3.csv")
+CO2023<-read.csv("2023O3.csv")
+
+CDMX<-st_read("09ent.shp")
+coords <- st_coordinates(CDMX_geo)
+st_crs(CDMX)
+CDMX_geo <- st_transform(CDMX, crs = 4326)
+st_crs(CDMX_geo)  
+coords <- st_coordinates(CDMX_geo)
+head(st_coordinates(CDMX_geo))
+
+colnames(CO2017)
+colnames(CO2018)
+colnames(CO2019)
+colnames(CO2022)
+colnames(CO2023)
+
+###AGREGAR COLUMNAS FALTANTES
+
+CO2017$FAR <- -99
+CO2017$LAA <- -99
+CO2017$SAC <- -99
+CO2018$FAR <- -99
+CO2018$SAC <- -99
+CO2018$LAA <- -99
+CO2022$LAA <- -99
+CO2023$LAA <- -99
+
+####Unir todo
+CO1<-rbind(CO2023,CO2022,CO2019,CO2018,CO2017)#### Sin coordenadas
+
+#Checamos las coordenadas geográficas
+print(CDMX_geo)
+plot(CDMX_geo$geometry, col = "transparent", border = "black", lwd = 1)
+puntos_sf <- st_as_sf(COOR, coords = c("Longitud", "Latitud"), crs = 4326)
+st_crs(puntos_sf)  
+ggplot() +
+  geom_sf(data = CDMX_geo, fill = "lightgray", color = "black") +  
+  geom_sf(data = puntos_sf, color = "red", size = 3) +  
+  ggtitle("Estaciones de RAMA") +
+  theme_minimal()
+
+
+##### Promedios diarios
+DailyPollutantAverage <- function(data, date_column = "FECHA", hour_column = "HORA") {
+  data[[date_column]] <- as.Date(data[[date_column]])
+  data <- data %>%
+    mutate(across(where(is.numeric), ~ replace(., . == -99, NA)))
+  daily_avg <- data %>%
+    group_by_at(date_column) %>%
+    summarise(across(where(is.numeric), mean, na.rm = TRUE), .groups = "drop")
+  
+  return(daily_avg)
+}
+
+CO_Daverage<-DailyPollutantAverage(CO1)         
+
+#### Filtro de Abril a Agosto
+CO_Daverage$FECHA <- as.Date(CO_Daverage$FECHA)
+CO_fechas <- CO_Daverage %>%
+  filter(format(FECHA, "%Y") %in% c("2017", "2018", "2019", "2022", "2023")) %>%  
+  filter(format(FECHA, "%m") %in% c("04", "05", "06", "07", "08"))  
+
+
+####Verificar el porcentaje de datos faltantes con el filtrado
+Missing1 <- function(x, missing_value = NaN) { 
+  x <- x %>%
+    mutate(across(where(is.character), as.numeric))  
+  missing_counts <- sapply(x, function(col) sum(is.nan(col), na.rm = TRUE))  
+  total_rows <- nrow(x)
+  missing_percentages <- (missing_counts / total_rows) * 100
+  table_final <- data.frame(
+    Variable = names(missing_counts),
+    Missing_Values = missing_counts,
+    Missing_Percentage = round(missing_percentages, 2)  
+  )
+  table_final <- table_final[!table_final$Variable %in% c("FECHA", "HORA"), ]
+  
+  return(table_final)
+}
+
+CO_F <- Missing1(CO_fechas)
+str(CO_F)
+colnames(CO_F)
+COF1<- CO_fechas[ , ! colnames(CO_fechas) %in% c("LAA",
+                                      "COY",
+                                      "SJA",
+                                      "SAC",
+                                      "FAR",
+                                      "HGM",
+                                      "CAM",
+                                      "XAL") ]
+
+#####Promedios totales
+
+OverallStats <- function(data, date_column = "FECHA", hour_column = "HORA") {
+  # Eliminar las columnas de fecha y hora del dataframe
+  data <- data %>%
+    select(-all_of(c(date_column, hour_column)))
+  
+  # Reemplazar valores -99 por NA en columnas numéricas
+  data <- data %>%
+    mutate(across(where(is.numeric), ~ replace(., . == -99, NA)))
+  
+  # Calcular el promedio y desviación estándar para cada columna numérica
+  stats <- data %>%
+    summarise(across(where(is.numeric), 
+                     list(mean = ~ mean(., na.rm = TRUE), 
+                          sd = ~ sd(., na.rm = TRUE)), 
+                     .names = "{.col}_{.fn}"))
+  
+  # Transponer a un formato más legible (opcional)
+  stats <- pivot_longer(stats, everything(), 
+                        names_to = c("Variable", ".value"), 
+                        names_sep = "_")
+  
+  return(stats)
+}
+
+CO_stats<-OverallStats(COF1)
+
+####Reorganizar la tabla
+data_reorganized <- CO_F1 %>% 
+  pivot_longer(
+    cols = -c(FECHA, HORA),  
+    names_to = "Sitio",      
+    values_to = "Valor"      
+  )
+
+###Georeferenciar
+CO_coor<- data_reorganized %>% 
+  left_join(COOR, by = "Sitio")
+
+
+
+#Chcamos de nuevo las coordenadas geográficas
+plot(CO_coor$Longitud,CO_coor$Latitud)
+plot(CDMX$geometry, col = "transparent", border = "black", lwd = 1)
+
+
+####Análisis
+
+#Grafica de dispersión para todas las variables.
+pairs(CO_coor[, c("Latitud", "Longitud", "Valor")])
+
+#Otro tipo de gráfica con curva suavizada sobrepuesta.  Nos ayudan a ver tendencia y 
+# a checar homogeneidad de varianza
+CO_coor_clean <- na.omit(CO_coor)
+plot(CO_coor_clean$Longitud, CO_coor_clean$Valor)
+lines(lowess(CO_coor_clean$Longitud, CO_coor_clean$Valor), col=2)
+
+plot(CO_coor_clean$Latitud, CO_coor_clean$Valor)
+lines(lowess(CO_coor_clean$Latitud, CO_coor_clean$Valor), col=2)
+
+#Histogramas.  Nos permiten checar el número de modas
+######TOTAL
+hist(CO_coor$Valor,nclass=30)
+hist(CO_coor_clean$Valor,nclass=30)
+
+CO_coor$Mes <- format(CO_coor$FECHA, "%m")
+CO_coor_clean$Mes <- format(CO_coor_clean$FECHA, "%m")
+mes <- c("Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", 
+         "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre")
+par(mfrow = c(3, 2))
+for (i in 4:8) {  
+  hist(
+    CO_coor$Valor[CO_coor$Mes == sprintf("%02d", i)],  
+    nclass = 30,  
+    xlab = "Concentración CO (ppm)",
+    ylab = "Frecuencia",  
+    main = mes[i],  
+    col = "lightblue",  
+    border = "black"  
+  )
+}
+
+
+#Boxplots
+par(mfrow=c(1,1))
+
+plot(CO_coor$Mes,CO_coor$Valor)
+
+boxplot(split(CO_coor_clean$Valor,as.factor(CO_coor_clean$Mes)))
+
+####Análisis espacial
+# coordenadas y el otro elemento son los valores de las variables de interes
+CO.geo<-as.geodata(cbind(CO_coor$Longitud,CO_coor$Latitud,CO_coor$Valor))
+plot(CO.geo)
+
+#Tendencia lineal
+CO.lm<-lm(Valor~Longitud+Latitud,data=CO_coor)
+summary(CO.lm)
+CO.lm<-lm(Valor~Longitud+Latitud+I(Longitud^2)+I(Latitud^2)+I(Longitud*Latitud),data=CO_coor)
+summary(CO.lm)
+
+#removiendo la tendencia con polinomio de orden 1
+variog.CO1<- variog(CO.geo,max.dist=10,trend="1st")
+plot(variog.CO1)
+
+#removiendo la tendencia con polinomio de orden 2
+variog.CO2<- variog(CO.geo,max.dist=10,trend="2nd")
+plot(variog.CO2)
+
+# Si hay problema de coordenadas duplicadas
+
+dup.coords(CO.geo)
+
+CO.geo<-jitterDupCoords(CO.geo, max=.01)
+variog.CO2<- variog(CO.geo,max.dist=10,trend="2nd")
+plot(variog.CO2)
+
+# Método por mínimos cuadrados no lineales
+
+vario.CO.mod1<-variofit(variog.CO2,ini.cov.pars=c(2.14,1.04),cov.model="exponential")
+lines(vario.CO.mod1)
+
+# Metodo a ojímetro
+vario.CO.mod2<-eyefit(variog.CO2)
+
+# Evaluamos el variograma ajustado mediante validación cruzada
+valcruz.CO<-xvalid(CO.geo,model=vario.CO.mod1)
+plot(valcruz.CO)
+
+################################
+#Prediccion Espacial
+# Primero obtenemos el mapa de puntos de muestreo
+
+plot(CO.geo$coords,xlab="Longitud",ylab="Latitud")
+summary(CO.geo$coords)
+
+#creamos una red de 10 mil puntos donde vamos a predecir
+plot(CO.geo$coords)
+mired<-expand.grid(long=seq(-99.39,-98.88,length=10),lat=seq(19.17,19.67,length=10))
+points(mired,col=2,pch=19,cex=.4)
+
+############# Usar el variograma que se haya elegido
+
+
+
+####
+CO.krig1<-krige.conv(CO.geo,loc=mired,krige=krige.control(obj.model=vario.CO.mod1))
+
+#imagen de los resultados
+plot(CDMX_geo$lon,CDMX$lat,pch=".")
+image(CO.krig1,add=T)
+points(CDMX$lon,CDMX$lat,pch=".")
+contour(CO.krig1,add=T)
+
+#Imagen con la desviación estándar de kriging
+plot(contorno$lon,contorno$lat,pch=".")
+image(temin.krig1,value=temin.krig1$krige.var,add=T)
+points(contorno$lon,contorno$lat,pch=".")
+contour(temin.krig1,value=temin.krig1$krige.var,add=T)
+
+#Imagen 3d de la desviación estándar
+persp(temin.krig1,value=temin.krig1$krige.var)
+
+
+
+
+####### Posibilidad de anisotropía.
+#El ángulo de orientación es de aproximadamente 335 grados o 0.9305556*pi
+
+# variog4 pide 4 angulos en unidades de pi.  En nuestro caso serían (65/360)*pi; 
+# (155/360)*pi: (245/360)*pi y (335/360)*pi
+
+CO.4<-variog4(CO.geo,trend="2nd",maxdist=10,direction=c((65/360)*pi,(155/360)*pi,
+                                                        (245/360)*pi,(335/360)*pi),tolerance=pi/8,unit.angle="radians")
+
+plot(CO.4)
+
+# Con tendencia es muy difícil detectar anisotropías.
+# Quitemos la tendencia
+
+CO.42nd<-variog4(CO.geo,trend="2nd",maxdist=5,direction=c(25,70,115,160),tolerance=pi/8,unit.angle="degrees")
+
+plot(CO.42nd$`25`$u,CO.42nd$`25`$v,col=4)
+points(CO.42nd$`70`$u,CO.42nd$`70`$v,col=2)
+points(CO.42nd$`115`$u,CO.42nd$`115`$v,col=3)
+points(CO.42nd$`160`$u,CO.42nd$`160`$v,col=1)
